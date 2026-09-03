@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Release Top Tracks</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">Spotify playlist builder</p>
+      <h1>Release Top Tracks</h1>
+      <p>Geef releases op als <strong>Artiest - Release</strong>. De app zoekt per release de populairste tracks en maakt er één playlist van.</p>
+    </header>
+
+    <section class="card auth-row">
+      <div>
+        <span id="authDot" class="dot"></span>
+        <span id="authText">Niet verbonden met Spotify</span>
+      </div>
+      <div class="button-row">
+        <button id="loginBtn" class="primary">Verbinden met Spotify</button>
+        <button id="logoutBtn" class="secondary hidden">Uitloggen</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <label for="releases">Releases, één per regel</label>
+      <textarea id="releases" rows="10" placeholder="Clouds Indoor - Go Sleep&#10;Artist - Album of EP"></textarea>
+      <p class="hint">Je mag ook een Spotify albumlink plakken. Een link is nauwkeuriger dan zoeken op naam.</p>
+
+      <div class="grid">
+        <div>
+          <label for="trackCount">Aantal toptracks per release</label>
+          <input id="trackCount" type="number" min="1" max="50" value="3">
+        </div>
+        <div>
+          <label for="playlistName">Naam van de playlist</label>
+          <input id="playlistName" type="text" value="Release Top Tracks">
+        </div>
+      </div>
+
+      <div class="checks">
+        <label class="check"><input id="makePublic" type="checkbox"> Openbare playlist</label>
+        <label class="check"><input id="dedupe" type="checkbox" checked> Dubbele nummers verwijderen</label>
+      </div>
+
+      <button id="buildBtn" class="primary wide" disabled>Playlist maken</button>
+    </section>
+
+    <section id="progressCard" class="card hidden" aria-live="polite">
+      <div class="progress-head"><strong id="progressTitle">Bezig...</strong><span id="progressCount"></span></div>
+      <div class="bar"><div id="barFill"></div></div>
+      <div id="log" class="log"></div>
+    </section>
+
+    <section id="resultCard" class="card hidden">
+      <h2>Klaar</h2>
+      <p id="resultText"></p>
+      <a id="playlistLink" class="primary link-button" target="_blank" rel="noopener">Open playlist in Spotify</a>
+    </section>
+  </main>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
