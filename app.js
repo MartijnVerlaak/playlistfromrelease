@@ -58,11 +58,25 @@ async function spotify(path,options={},retry=true){
   if(!state.token || state.expiresAt<=Date.now()){logout();throw new Error('Je sessie is verlopen. Verbind opnieuw met Spotify.');}
   const headers={Authorization:`Bearer ${state.token}`,...(options.body?{'Content-Type':'application/json'}:{}),...(options.headers||{})};
   const r=await fetch(API+path,{...options,headers});
-  if(r.status===429 && retry){const wait=Math.min(Number(r.headers.get('Retry-After')||2),30);log(`Rate limit bereikt. ${wait} seconden wachten...`,'warn');await new Promise(x=>setTimeout(x,wait*1000));return spotify(path,options,false);}
+  if(r.status===429 && retry){
+    const wait=Math.min(Number(r.headers.get('Retry-After')||2),30);
+    log(`Spotify-limiet bereikt. ${wait} seconden wachten en nog één keer proberen...`,'warn');
+    await new Promise(x=>setTimeout(x,wait*1000));
+    return spotify(path,options,false);
+  }
   if(r.status===204) return null;
   const data=await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(data?.error?.message||`Spotify-fout ${r.status}`);
+  if(!r.ok){
+    const error=new Error(data?.error?.message||`Spotify-fout ${r.status}`);
+    error.status=r.status;
+    error.code=r.status===429?'QUOTA_EXCEEDED':'SPOTIFY_ERROR';
+    throw error;
+  }
   return data;
+}
+function isQuotaError(error){
+  const text=String(error?.message||'').toLowerCase();
+  return error?.status===429 || error?.code==='QUOTA_EXCEEDED' || text.includes('quota exceeded') || text.includes('rate limit');
 }
 function normalize(s){return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').trim();}
 function similarity(a,b){
@@ -124,25 +138,106 @@ async function build(){
   const lines=$('releases').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   const n=Math.max(1,Math.min(50,Number($('trackCount').value)||1));
   if(!lines.length)return alert('Geef minstens één release op.');
-  const items=lines.map(parseLine);const selected=[];const failures=[];
-  $('buildBtn').disabled=true;$('resultCard').classList.add('hidden');$('progressCard').classList.remove('hidden');$('log').innerHTML='';progress(0,items.length,'Releases verwerken');
+
+  const items=lines.map(parseLine);
+  const selected=[];
+  const failures=[];
+  let processed=0;
+  let quotaReached=false;
+  let quotaMessage='';
+
+  $('buildBtn').disabled=true;
+  $('resultCard').classList.add('hidden');
+  $('progressCard').classList.remove('hidden');
+  $('log').innerHTML='';
+  progress(0,items.length,'Releases verwerken');
+
   for(let i=0;i<items.length;i++){
     const item=items[i];
     try{
       const found=item.albumId?await resolveByLink(item):await resolveBySearch(item);
-      const top=found.tracks.filter(t=>t?.uri && t.is_playable!==false).sort((a,b)=>(b.popularity??-1)-(a.popularity??-1)).slice(0,n);
-      selected.push(...top);log(`✓ ${found.label}: ${top.length} track(s)`,'ok');
-    }catch(e){failures.push(`${item.raw}: ${e.message}`);log(`✗ ${item.raw}: ${e.message}`,'error');}
-    progress(i+1,items.length,'Releases verwerken');
+      const top=found.tracks
+        .filter(t=>t?.uri && t.is_playable!==false)
+        .sort((a,b)=>(b.popularity??-1)-(a.popularity??-1))
+        .slice(0,n);
+      selected.push(...top);
+      processed++;
+      log(`✓ ${found.label}: ${top.length} track(s)`,'ok');
+    }catch(e){
+      if(isQuotaError(e)){
+        quotaReached=true;
+        quotaMessage=e.message;
+        log(`⚠ Spotify-limiet bereikt bij “${item.raw}”. Verdere releases worden overgeslagen.`,'warn');
+        log('De app probeert nu een playlist te maken met alle reeds gevonden tracks.','warn');
+        break;
+      }
+      failures.push(`${item.raw}: ${e.message}`);
+      processed++;
+      log(`✗ ${item.raw}: ${e.message}`,'error');
+    }
+    progress(processed,items.length,'Releases verwerken');
   }
+
   let finalTracks=selected;
-  if($('dedupe').checked){const seen=new Set();finalTracks=selected.filter(t=>{const k=trackKey(t);if(seen.has(k))return false;seen.add(k);return true;});}
-  if(!finalTracks.length){$('buildBtn').disabled=false;throw new Error('Geen tracks gevonden. Er is geen playlist aangemaakt.');}
-  progress(items.length,items.length,'Playlist aanmaken');
-  const playlist=await spotify('/me/playlists',{method:'POST',body:JSON.stringify({name:$('playlistName').value.trim()||'Release Top Tracks',public:$('makePublic').checked,description:`Top ${n} tracks per opgegeven release. Gemaakt met Release Top Tracks.`})});
-  for(let i=0;i<finalTracks.length;i+=100){await spotify(`/playlists/${playlist.id}/items`,{method:'POST',body:JSON.stringify({uris:finalTracks.slice(i,i+100).map(t=>t.uri)})});}
-  $('resultText').textContent=`${finalTracks.length} tracks toegevoegd uit ${items.length-failures.length} van de ${items.length} releases.${failures.length?` ${failures.length} release(s) konden niet worden verwerkt.`:''}`;
-  $('playlistLink').href=playlist.external_urls.spotify;$('resultCard').classList.remove('hidden');log(`Playlist aangemaakt met ${finalTracks.length} tracks.`,'ok');$('buildBtn').disabled=false;
+  if($('dedupe').checked){
+    const seen=new Set();
+    finalTracks=selected.filter(t=>{
+      const k=trackKey(t);
+      if(seen.has(k))return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  if(!finalTracks.length){
+    $('buildBtn').disabled=false;
+    const reason=quotaReached
+      ? 'De Spotify-limiet werd bereikt voordat er tracks gevonden waren. Er kon geen playlist worden aangemaakt.'
+      : 'Geen tracks gevonden. Er is geen playlist aangemaakt.';
+    throw new Error(reason);
+  }
+
+  progress(processed,items.length,quotaReached?'Gedeeltelijke playlist aanmaken':'Playlist aanmaken');
+
+  let playlist;
+  try{
+    playlist=await spotify('/me/playlists',{
+      method:'POST',
+      body:JSON.stringify({
+        name:$('playlistName').value.trim()||'Release Top Tracks',
+        public:$('makePublic').checked,
+        description:quotaReached
+          ? `Gedeeltelijke playlist: Spotify-limiet bereikt na ${processed} van ${items.length} verwerkte releases.`
+          : `Top ${n} tracks per opgegeven release. Gemaakt met Release Top Tracks.`
+      })
+    });
+
+    for(let i=0;i<finalTracks.length;i+=100){
+      await spotify(`/playlists/${playlist.id}/items`,{
+        method:'POST',
+        body:JSON.stringify({uris:finalTracks.slice(i,i+100).map(t=>t.uri)})
+      });
+    }
+  }catch(e){
+    if(isQuotaError(e)){
+      throw new Error('De limiet bleef actief tijdens het aanmaken of vullen van de playlist. Spotify liet de opslag daardoor niet toe. Probeer het later opnieuw.');
+    }
+    throw e;
+  }
+
+  const skipped=items.length-processed;
+  if(quotaReached){
+    $('resultText').textContent=`Spotify-limiet bereikt. De gedeeltelijke playlist bevat ${finalTracks.length} tracks uit ${processed} verwerkte releases. ${skipped} release(s) werden niet meer verwerkt.`;
+    log(`Gedeeltelijke playlist opgeslagen: ${finalTracks.length} tracks uit ${processed} van ${items.length} verwerkte releases.`,'warn');
+    if(quotaMessage)log(`Spotify-melding: ${quotaMessage}`,'warn');
+  }else{
+    $('resultText').textContent=`${finalTracks.length} tracks toegevoegd uit ${items.length-failures.length} van de ${items.length} releases.${failures.length?` ${failures.length} release(s) konden niet worden verwerkt.`:''}`;
+    log(`Playlist aangemaakt met ${finalTracks.length} tracks.`,'ok');
+  }
+
+  $('playlistLink').href=playlist.external_urls.spotify;
+  $('resultCard').classList.remove('hidden');
+  $('buildBtn').disabled=false;
 }
 
 $('loginBtn').addEventListener('click',()=>login().catch(e=>alert(e.message)));
